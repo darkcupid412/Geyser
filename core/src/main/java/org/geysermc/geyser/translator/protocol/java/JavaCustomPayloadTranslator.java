@@ -108,6 +108,10 @@ public class JavaCustomPayloadTranslator extends PacketTranslator<ClientboundCus
                 });
                 session.sendForm(form);
             });
+            case PluginMessageChannels.DDUI -> session.ensureInEventLoop(() ->
+                    session.getDataDrivenFloodgateSpeaker().handle(packet.getData(), reply ->
+                            session.sendDownstreamPacket(
+                                    new ServerboundCustomPayloadPacket(packet.getChannel(), reply))));
             case PluginMessageChannels.TRANSFER -> session.ensureInEventLoop(() -> {
                 byte[] data = packet.getData();
 

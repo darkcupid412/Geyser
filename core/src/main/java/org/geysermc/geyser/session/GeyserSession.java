@@ -194,10 +194,11 @@ import org.geysermc.geyser.session.cache.registry.JavaRegistries;
 import org.geysermc.geyser.session.cache.tags.DialogTag;
 import org.geysermc.geyser.session.cache.waypoint.GeyserWaypoint;
 import org.geysermc.geyser.session.cache.waypoint.WaypointCache;
+import org.geysermc.geyser.session.datadrivenui.DataDrivenFloodgateSpeaker;
+import org.geysermc.geyser.session.datadrivenui.DataDrivenManager;
 import org.geysermc.geyser.session.dialog.BuiltInDialog;
 import org.geysermc.geyser.session.dialog.Dialog;
 import org.geysermc.geyser.session.dialog.DialogManager;
-import org.geysermc.geyser.session.datadrivenui.DataDrivenManager;
 import org.geysermc.geyser.skin.SkinManager;
 import org.geysermc.geyser.text.GeyserLocale;
 import org.geysermc.geyser.translator.inventory.InventoryTranslator;
@@ -310,6 +311,7 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
     private final EntityEffectCache effectCache;
     private final FormCache formCache;
     private final DataDrivenManager dataDrivenManager;
+    private final DataDrivenFloodgateSpeaker dataDrivenFloodgateSpeaker;
     private final GameRuleHandler gameRuleHandler;
     private final InputCache inputCache;
     private final LodestoneCache lodestoneCache;
@@ -872,6 +874,7 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
         this.effectCache = new EntityEffectCache();
         this.formCache = new FormCache(this);
         this.dataDrivenManager = new DataDrivenManager(this);
+        this.dataDrivenFloodgateSpeaker = new DataDrivenFloodgateSpeaker(this);
         this.inputCache = new InputCache(this);
         this.lodestoneCache = new LodestoneCache();
         this.pistonCache = new PistonCache(this);
@@ -1275,6 +1278,7 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
 
             // A data-driven form can no longer be shown or closed; report it closed
             dataDrivenManager.disconnected();
+            dataDrivenFloodgateSpeaker.reset();
 
             // Remove from session manager
             geyser.getSessionManager().removeSession(this);

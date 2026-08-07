@@ -66,7 +66,7 @@ public interface GeyserConnection extends Connection, CommandSource {
     int ping();
 
     /**
-     * @return {@code true} if the client currently has a form open.
+     * @return {@code true} if the client currently has a form or data-driven screen open.
      * @since 2.8.0
      */
     boolean hasFormOpen();

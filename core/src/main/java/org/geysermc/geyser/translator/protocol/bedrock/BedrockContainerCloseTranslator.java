@@ -94,6 +94,7 @@ public class BedrockContainerCloseTranslator extends PacketTranslator<ContainerC
             // We must wait until current inventory is closed to ensure the form displays
             // and is not immediately closed by the client
             session.getFormCache().resendAllForms();
+            session.getDataDrivenManager().resendPending();
         }
     }
 }

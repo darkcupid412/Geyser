@@ -25,11 +25,13 @@
 
 package org.geysermc.geyser.session.datadrivenui;
 
+import org.checkerframework.checker.nullness.qual.Nullable;
+
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * One showing of a data-driven screen: the property it seeds, the paths the client may write, and
@@ -48,18 +50,26 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  *   <li>{@code pathUpdateCount} is a single sequence per path, continued across both directions:
  *       the client counts its own writes, and a server push continues wherever the sequence
  *       currently stands. A push kept on a private counter would fall behind after the player's
- *       first edit.
+ *       first edit. The counts are unsigned and only climb, so a write at or below what a path
+ *       has already had is a repeat and is dropped; a resent button packet must not press the
+ *       button twice.
  *   <li>A property name is never reused. Vanilla keeps a property's counters after its removal,
  *       so a reused name would inherit them; every showing gets a fresh instance id, and the
  *       property carries its unsigned rendering.
  * </ul>
  */
-public final class DataDrivenScreenSession {
+final class DataDrivenScreenSession {
+
+    /** The unsigned maximum, which the schema excludes: its stated maximum stops one short. */
+    private static final int COUNT_EXHAUSTED = -1;
+
+    /** The longest string the client accepts in a data store value. */
+    private static final int MAX_STRING_LENGTH = 5000;
 
     /** How a session gets its packets out; implemented over the Bedrock connection. */
-    public interface Host {
-        /** Seeds the property with the full tree, at epoch 1, before the screen is shown. */
-        void sendSeed(String property, Map<String, Object> tree);
+    interface Host {
+        /** Seeds the property with the full tree, opening its epoch, before the screen is shown. */
+        void sendSeed(String property, Map<String, Object> tree, int updateCount);
 
         /** Tells the client to show the screen reading that property. */
         void sendShow(String screenId, int formId, int dataInstanceId);
@@ -74,23 +84,27 @@ public final class DataDrivenScreenSession {
         void sendTeardown(String property, int updateCount);
     }
 
-    /** What a client write to a bound path flows into, after validation. */
-    public interface WriteHandler {
-        void handle(Object value);
+    /**
+     * What a client write to a bound path flows into, after validation. Only client writes reach
+     * it, never pushes, which is what makes it the place for anything inbound-only; it gets the
+     * raw value too, because that is what the client is showing.
+     */
+    interface WriteHandler {
+        void handle(Object rawValue, Object normalized);
     }
 
     /**
      * Checks and normalizes a client-written value. Returns what the write should become (a
      * slider write clamps into its range, for example), or null to drop the write entirely.
      */
-    public interface Validator {
+    interface Validator {
         Validator ANY = value -> value;
 
         @Nullable Object normalize(Object value);
     }
 
     /** The primitive types a path can carry; the update packet knows exactly these three. */
-    public enum ValueType {
+    enum ValueType {
         STRING(String.class),
         BOOLEAN(Boolean.class),
         DOUBLE(Double.class);
@@ -109,6 +123,8 @@ public final class DataDrivenScreenSession {
     private enum State {
         NEW,
         SHOWN,
+        /** Close sent, waiting for the client to report the screen closed before tearing down. */
+        CLOSE_REQUESTED,
         CLOSED
     }
 
@@ -119,11 +135,17 @@ public final class DataDrivenScreenSession {
     private final int dataInstanceId;
     private final Map<String, Object> seed = new LinkedHashMap<>();
     private final Map<String, Binding> bindings = new HashMap<>();
+    /**
+     * The highest count each path has reached, whichever side moved it there. One sequence per
+     * path means one floor: a count at or below this has already been spent, whether it was spent
+     * by a push or by the client.
+     */
     private final Map<String, Integer> pathUpdateCounts = new HashMap<>();
     private int updateCount = 1;
+    private boolean exhausted;
     private State state = State.NEW;
 
-    public DataDrivenScreenSession(Host host, String screenId, String propertyBase, int formId, int dataInstanceId) {
+    DataDrivenScreenSession(Host host, String screenId, String propertyBase, int formId, int dataInstanceId) {
         this.host = Objects.requireNonNull(host, "host");
         this.screenId = Objects.requireNonNull(screenId, "screenId");
         this.formId = formId;
@@ -132,22 +154,50 @@ public final class DataDrivenScreenSession {
         this.propertyName = propertyBase + "_" + Integer.toUnsignedString(dataInstanceId);
     }
 
-    public int formId() {
+    int formId() {
         return formId;
     }
 
-    public String propertyName() {
+    String propertyName() {
         return propertyName;
     }
 
-    public boolean closed() {
+    boolean closed() {
         return state == State.CLOSED;
     }
 
-    /** Sets the tree the property is seeded with. Only possible before the screen is shown. */
-    public void seed(Map<String, Object> tree) {
+    /**
+     * Sets the tree the property is seeded with. Only possible before the screen is shown. Values
+     * the client cannot hold are refused here the way {@link #push} refuses them, but by throwing:
+     * a bad value in the seed takes the whole property down, and unlike a push there is a caller
+     * to tell.
+     */
+    void seed(Map<String, Object> tree) {
         requireNew();
+        checkTree("", tree);
         seed.putAll(tree);
+    }
+
+    private static void checkTree(String path, Map<String, Object> tree) {
+        for (Map.Entry<String, Object> entry : tree.entrySet()) {
+            checkValue(path + entry.getKey(), entry.getValue());
+        }
+    }
+
+    private static void checkValue(String path, Object value) {
+        if (value instanceof Map) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> child = (Map<String, Object>) value;
+            checkTree(path + ".", child);
+        } else if (value instanceof List) {
+            // Rawtext parts arrive as lists. Text's own limits already cap everything a list can
+            // hold, but the guarantee here must not depend on a different file keeping its.
+            for (Object element : (List<?>) value) {
+                checkValue(path, element);
+            }
+        } else if (!acceptable(value)) {
+            throw new IllegalArgumentException("the client cannot hold the seeded value at " + path);
+        }
     }
 
     /**
@@ -155,7 +205,7 @@ public final class DataDrivenScreenSession {
      * the client may write it. Every other path the client writes is dropped. The vanilla server
      * keeps the same kind of per-path allowlist.
      */
-    public void bind(String path, ValueType type, boolean clientWritable, Validator validator, WriteHandler handler) {
+    void bind(String path, ValueType type, boolean clientWritable, Validator validator, WriteHandler handler) {
         requireNew();
         Objects.requireNonNull(path, "path");
         if (bindings.putIfAbsent(path, new Binding(type, clientWritable, validator, handler)) != null) {
@@ -164,21 +214,21 @@ public final class DataDrivenScreenSession {
     }
 
     /** Seeds the property and shows the screen. A session shows exactly once. */
-    public void show() {
+    void show() {
         requireNew();
         state = State.SHOWN;
-        host.sendSeed(propertyName, seed);
+        host.sendSeed(propertyName, seed, updateCount);
         host.sendShow(screenId, formId, dataInstanceId);
     }
 
     /**
      * Pushes a new value for a bound path into the open screen, continuing the path's shared
      * sequence. Quietly does nothing once closed, since observables may fire while a close is
-     * already on its way.
+     * already on its way. Returns whether an update actually went out.
      */
-    public void push(String path, Object value) {
+    boolean push(String path, Object value) {
         if (state != State.SHOWN) {
-            return;
+            return false;
         }
         Binding binding = bindings.get(path);
         if (binding == null) {
@@ -188,68 +238,132 @@ public final class DataDrivenScreenSession {
             throw new IllegalArgumentException(
                     "path " + path + " carries " + binding.type + ", not " + value.getClass().getSimpleName());
         }
-        int pathCount = pathUpdateCounts.merge(path, 1, Integer::sum);
-        host.sendUpdate(propertyName, path, value, updateCount, pathCount);
+        // A value the server sends goes through the same normalization a value from the client
+        // does, and what was normalized is what is sent: a form is driven by whatever a plugin
+        // puts in its observables, so it can hold a string too long for the client or a number
+        // outside the range the component was built with, and the client rejects the whole
+        // property rather than the one bad value.
+        Object normalized = binding.validator.normalize(value);
+        if (normalized == null || !acceptable(normalized)) {
+            return false;
+        }
+        int pathCount = pathUpdateCounts.getOrDefault(path, 0) + 1;
+        if (pathCount == COUNT_EXHAUSTED) {
+            // The schema stops one short of the unsigned maximum, and there is no way to keep
+            // counting past it. The stored count stays where it was, so later pushes are refused
+            // here again rather than wrapping the sequence around.
+            exhausted = true;
+            return false;
+        }
+        pathUpdateCounts.put(path, pathCount);
+        host.sendUpdate(propertyName, path, normalized, updateCount, pathCount);
+        return true;
     }
 
     /**
      * Applies one client write. The path has to be bound and writable, the epoch current, the
-     * type right, and the validator willing; anything else drops the write. Returns whether it
-     * was applied.
+     * count newer than anything already seen for that path, the type right, and the validator
+     * willing; anything else drops the write. Returns whether it was applied.
      */
-    public boolean handleClientWrite(String path, Object value, int clientUpdateCount, int clientPathUpdateCount) {
+    boolean handleClientWrite(String path, Object value, int clientUpdateCount, int clientPathUpdateCount) {
         if (state != State.SHOWN) {
             return false;
         }
         Binding binding = bindings.get(path);
-        if (binding == null || !binding.clientWritable) {
+        if (binding == null) {
             return false;
         }
         if (clientUpdateCount != updateCount) {
             // A write from an epoch this property no longer lives in.
             return false;
         }
+        if (clientPathUpdateCount == COUNT_EXHAUSTED) {
+            // The schema excludes this count; taking it would leave the sequence nowhere to go.
+            return false;
+        }
+        Integer spent = pathUpdateCounts.get(path);
+        if (spent != null && Integer.compareUnsigned(clientPathUpdateCount, spent) <= 0) {
+            // Counts only ever climb, so anything at or below what this path has already reached
+            // is a repeat, including a count a server push just used. Acting on one would press a
+            // button twice.
+            return false;
+        }
+        if (!binding.clientWritable) {
+            // The client sequences only what it may write. Its count for anything else is not
+            // part of that path's sequence, and taking it would let one packet pin a push-only
+            // path at the ceiling and exhaust the screen.
+            return false;
+        }
+        // Within a path it does write, the client's sequence moved whether or not the value is
+        // taken, so the floor rises before the value is judged; a push after a dropped write must
+        // still land ahead of it.
+        pathUpdateCounts.put(path, clientPathUpdateCount);
         if (!binding.type.matches(value)) {
             return false;
         }
-        if (value instanceof Double && !Double.isFinite((Double) value)) {
-            return false;
-        }
         Object normalized = binding.validator.normalize(value);
-        if (normalized == null) {
+        // What the validator made of the value faces the same holdability check either way round.
+        if (normalized == null || !acceptable(value) || !acceptable(normalized)) {
             return false;
         }
-        // The client counts its own writes; whatever the sequence reaches is where a later push
-        // continues from.
-        pathUpdateCounts.merge(path, clientPathUpdateCount, Math::max);
-        binding.handler.handle(normalized);
+        binding.handler.handle(value, normalized);
         return true;
     }
 
-    /** Closes the screen from the server: the close packet, then the property teardown. */
-    public void close() {
+    /**
+     * Whether a path's count has run out. The screen has to be closed and shown again; nothing
+     * more can be pushed to it.
+     */
+    boolean exhausted() {
+        return exhausted;
+    }
+
+    /**
+     * Asks the client to close the screen. The property is torn down once the client reports it
+     * closed, which is the order vanilla uses; {@link #closedByClient()} finishes the job.
+     */
+    void close() {
         if (state != State.SHOWN) {
-            state = State.CLOSED;
+            if (state == State.NEW) {
+                state = State.CLOSED;
+            }
             return;
         }
-        state = State.CLOSED;
+        state = State.CLOSE_REQUESTED;
         host.sendCloseScreen(formId);
-        host.sendTeardown(propertyName, ++updateCount);
     }
 
     /** The client reported this screen closed; the property is still ours to tear down. */
-    public void closedByClient() {
-        if (state != State.SHOWN) {
-            state = State.CLOSED;
+    void closedByClient() {
+        if (state == State.CLOSED) {
             return;
         }
+        boolean shown = state != State.NEW;
         state = State.CLOSED;
-        host.sendTeardown(propertyName, ++updateCount);
+        if (shown) {
+            host.sendTeardown(propertyName, ++updateCount);
+        }
+    }
+
+    /** Whether a close was asked for and the client has not reported back yet. */
+    boolean closing() {
+        return state == State.CLOSE_REQUESTED;
     }
 
     /** Forgets the screen without sending anything, for when the connection is gone. */
-    public void discard() {
+    void discard() {
         state = State.CLOSED;
+    }
+
+    /** Whether a value is one the client can hold at all, whichever direction it came from. */
+    private static boolean acceptable(Object value) {
+        if (value instanceof Double) {
+            return Double.isFinite((Double) value);
+        }
+        if (value instanceof String) {
+            return ((String) value).length() <= MAX_STRING_LENGTH;
+        }
+        return true;
     }
 
     private void requireNew() {

@@ -43,9 +43,14 @@ public class QuickActionsCommand extends GeyserCommand {
     @Override
     public void execute(CommandContext<GeyserCommandSource> context) {
         GeyserSession session = Objects.requireNonNull(context.sender().connection());
-        session.openQuickActions();
-        if (!session.hasFormOpen()) {
-            context.sender().sendMessage(GeyserLocale.getPlayerLocaleString("geyser.commands.quickactions.fail", session.locale()));
-        }
+        // On the event loop: the dialog opens there, so an off-loop check would race it.
+        // Specifically the form cache, too: a dialog opens as a regular form, and an unrelated
+        // data-driven screen still being up must not swallow the failure message.
+        session.ensureInEventLoop(() -> {
+            session.openQuickActions();
+            if (!session.getFormCache().hasFormOpen()) {
+                context.sender().sendMessage(GeyserLocale.getPlayerLocaleString("geyser.commands.quickactions.fail", session.locale()));
+            }
+        });
     }
 }

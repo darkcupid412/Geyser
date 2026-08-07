@@ -110,6 +110,10 @@ import org.cloudburstmc.protocol.common.util.OptionalBoolean;
 import org.geysermc.api.util.BedrockPlatform;
 import org.geysermc.api.util.InputMode;
 import org.geysermc.api.util.UiProfile;
+import org.geysermc.cumulus.datadrivenui.DataDrivenCapabilities;
+import org.geysermc.cumulus.datadrivenui.DataDrivenForm;
+import org.geysermc.cumulus.datadrivenui.DataDrivenMessageBox;
+import org.geysermc.cumulus.datadrivenui.DataDrivenSession;
 import org.geysermc.cumulus.form.Form;
 import org.geysermc.cumulus.form.util.FormBuilder;
 import org.geysermc.geyser.GeyserImpl;
@@ -193,6 +197,7 @@ import org.geysermc.geyser.session.cache.waypoint.WaypointCache;
 import org.geysermc.geyser.session.dialog.BuiltInDialog;
 import org.geysermc.geyser.session.dialog.Dialog;
 import org.geysermc.geyser.session.dialog.DialogManager;
+import org.geysermc.geyser.session.datadrivenui.DataDrivenManager;
 import org.geysermc.geyser.skin.SkinManager;
 import org.geysermc.geyser.text.GeyserLocale;
 import org.geysermc.geyser.translator.inventory.InventoryTranslator;
@@ -304,6 +309,7 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
     private final EntityCache entityCache;
     private final EntityEffectCache effectCache;
     private final FormCache formCache;
+    private final DataDrivenManager dataDrivenManager;
     private final GameRuleHandler gameRuleHandler;
     private final InputCache inputCache;
     private final LodestoneCache lodestoneCache;
@@ -865,6 +871,7 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
         this.entityCache = new EntityCache(this);
         this.effectCache = new EntityEffectCache();
         this.formCache = new FormCache(this);
+        this.dataDrivenManager = new DataDrivenManager(this);
         this.inputCache = new InputCache(this);
         this.lodestoneCache = new LodestoneCache();
         this.pistonCache = new PistonCache(this);
@@ -1265,6 +1272,9 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
             if (!upstream.isClosed()) {
                 upstream.disconnect(disconnectEvent.disconnectReason());
             }
+
+            // A data-driven form can no longer be shown or closed; report it closed
+            dataDrivenManager.disconnected();
 
             // Remove from session manager
             geyser.getSessionManager().removeSession(this);
@@ -1888,28 +1898,32 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
     }
 
     private boolean doSendForm(@NonNull Form form) {
-        // Close all currently open forms.
-        if (formCache.hasFormOpen()) {
-            closeForm();
-        }
+        // On the event loop so the data-driven close below lands before the form is sent;
+        // closing a data-driven screen always happens there.
+        ensureInEventLoop(() -> {
+            // Close all currently open forms, of either kind: the client shows one screen at a time.
+            if (formCache.hasFormOpen()) {
+                formCache.closeForms();
+            }
+            dataDrivenManager.close();
 
-        // Cache this form, let's see whether we can open it immediately
-        formCache.addForm(form);
+            // Cache this form, let's see whether we can open it immediately
+            formCache.addForm(form);
 
-        // Also close current inventories, otherwise the form will not show
-        if (inventoryHolder != null) {
-            // We'll open the form when the client confirms current inventory being closed
-            InventoryUtils.sendJavaContainerClose(inventoryHolder);
-            InventoryUtils.closeInventory(this, inventoryHolder, true);
-        }
+            // Also close current inventories, otherwise the form will not show
+            if (inventoryHolder != null) {
+                // We'll open the form when the client confirms current inventory being closed
+                InventoryUtils.sendJavaContainerClose(inventoryHolder);
+                InventoryUtils.closeInventory(this, inventoryHolder, true);
+            }
 
-        // Open the current form, unless we're in the process of closing another
-        // If we're waiting, the form will be sent when Bedrock confirms closing
-        // If we don't wait, the client rejects the form as it is busy
-        if (!isClosingInventory() && upstream.isInitialized()) {
-            formCache.resendAllForms();
-        }
-
+            // Open the current form, unless we're in the process of closing another
+            // If we're waiting, the form will be sent when Bedrock confirms closing
+            // If we don't wait, the client rejects the form as it is busy
+            if (!isClosingInventory() && upstream.isInitialized()) {
+                formCache.resendAllForms();
+            }
+        });
         return true;
     }
 
@@ -1945,6 +1959,21 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
     public boolean sendForm(@NonNull FormBuilder<?, ?, ?> formBuilder) {
         sendForm(formBuilder.build());
         return true;
+    }
+
+    @Override
+    public @NonNull DataDrivenCapabilities dataDrivenCapabilities() {
+        return dataDrivenManager.capabilities();
+    }
+
+    @Override
+    public @Nullable DataDrivenSession showForm(@NonNull DataDrivenForm form) {
+        return dataDrivenManager.show(form);
+    }
+
+    @Override
+    public @Nullable DataDrivenSession showMessageBox(@NonNull DataDrivenMessageBox messageBox) {
+        return dataDrivenManager.show(messageBox);
     }
 
     private void startGame() {
@@ -2685,12 +2714,13 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
 
     @Override
     public boolean hasFormOpen() {
-        return formCache.hasFormOpen();
+        return formCache.hasFormOpen() || dataDrivenManager.hasScreenOpen();
     }
 
     @Override
     public void closeForm() {
         formCache.closeForms();
+        dataDrivenManager.close();
     }
 
     public void addCommandEnum(String name, String enums) {

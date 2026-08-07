@@ -48,6 +48,8 @@ import org.cloudburstmc.protocol.bedrock.packet.ResourcePackClientResponsePacket
 import org.cloudburstmc.protocol.bedrock.packet.ResourcePackDataInfoPacket;
 import org.cloudburstmc.protocol.bedrock.packet.ResourcePackStackPacket;
 import org.cloudburstmc.protocol.bedrock.packet.ResourcePacksInfoPacket;
+import org.cloudburstmc.protocol.bedrock.packet.ServerboundDataDrivenScreenClosedPacket;
+import org.cloudburstmc.protocol.bedrock.packet.ServerboundDataStorePacket;
 import org.cloudburstmc.protocol.bedrock.packet.SetTitlePacket;
 import org.cloudburstmc.protocol.common.PacketSignal;
 import org.cloudburstmc.protocol.common.util.Zlib;
@@ -303,6 +305,16 @@ public class UpstreamPacketHandler extends LoggingPacketHandler {
         }
         session.executeInEventLoop(() -> session.getFormCache().handleResponse(packet));
         return PacketSignal.HANDLED;
+    }
+
+    @Override
+    public PacketSignal handle(ServerboundDataStorePacket packet) {
+        return translateAndDefault(packet);
+    }
+
+    @Override
+    public PacketSignal handle(ServerboundDataDrivenScreenClosedPacket packet) {
+        return translateAndDefault(packet);
     }
 
     private boolean couldLoginUserByName(String bedrockUsername) {

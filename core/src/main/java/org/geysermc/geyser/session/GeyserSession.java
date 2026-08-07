@@ -1947,22 +1947,6 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
         return true;
     }
 
-    /**
-     * @deprecated since Cumulus version 1.1, and will be removed when Cumulus 2.0 releases. Please use the new forms instead.
-     */
-    @Deprecated
-    public void sendForm(org.geysermc.cumulus.Form<?> form) {
-        sendForm(form.newForm());
-    }
-
-    /**
-     * @deprecated since Cumulus version 1.1, and will be removed when Cumulus 2.0 releases. Please use the new forms instead.
-     */
-    @Deprecated
-    public void sendForm(org.geysermc.cumulus.util.FormBuilder<?, ?> formBuilder) {
-        sendForm(formBuilder.build());
-    }
-
     private void startGame() {
         this.upstream.getCodecHelper().setItemDefinitions(this.itemMappings);
         this.upstream.getCodecHelper().setBlockDefinitions(this.blockMappings);

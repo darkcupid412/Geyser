@@ -35,6 +35,11 @@ import org.geysermc.mcprotocollib.protocol.data.game.inventory.ContainerType;
 public class BeaconContainer extends Container {
     private int primaryId;
     private int secondaryId;
+    /**
+     * The beacon's level as last broadcast by the Java server. Bedrock computes its own level from
+     * the pyramid and ignores obstruction, so this is the only value that is safe to validate against.
+     */
+    private int beaconLevel;
 
     public BeaconContainer(GeyserSession session, String title, int id, int size, ContainerType containerType) {
         super(session, title, id, size, containerType);

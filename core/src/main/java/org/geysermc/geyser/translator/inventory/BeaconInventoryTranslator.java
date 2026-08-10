@@ -44,12 +44,15 @@ import org.geysermc.geyser.inventory.updater.UIInventoryUpdater;
 import org.geysermc.geyser.level.block.Blocks;
 import org.geysermc.geyser.session.GeyserSession;
 import org.geysermc.geyser.translator.level.block.entity.BlockEntityTranslator;
+import org.geysermc.mcprotocollib.protocol.data.game.entity.Effect;
 import org.geysermc.mcprotocollib.protocol.data.game.inventory.ContainerType;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.inventory.ServerboundSetBeaconPacket;
 
 import java.util.OptionalInt;
 
 public class BeaconInventoryTranslator extends AbstractBlockInventoryTranslator<BeaconContainer> {
+    private static final Effect[] EFFECTS = Effect.values();
+
     public BeaconInventoryTranslator() {
         super(1, new BlockInventoryHolder(Blocks.BEACON, org.cloudburstmc.protocol.bedrock.data.inventory.ContainerType.BEACON) {
             @Override
@@ -72,7 +75,8 @@ public class BeaconInventoryTranslator extends AbstractBlockInventoryTranslator<
         // on BDS
         switch (key) {
             case 0:
-                // Power - beacon doesn't use this, and uses the block position instead
+                // See BeaconContainer#beaconLevel for why this has to be tracked
+                container.setBeaconLevel(value);
                 break;
             case 1:
                 container.setPrimaryId(value == -1 ? 0 : value);
@@ -104,13 +108,72 @@ public class BeaconInventoryTranslator extends AbstractBlockInventoryTranslator<
     public ItemStackResponse translateSpecialRequest(GeyserSession session, BeaconContainer container, ItemStackRequest request) {
         // Input a beacon payment
         BeaconPaymentAction beaconPayment = (BeaconPaymentAction) request.getActions()[0];
-        ServerboundSetBeaconPacket packet = new ServerboundSetBeaconPacket(toJava(beaconPayment.getPrimaryEffect()), toJava(beaconPayment.getSecondaryEffect()));
+        OptionalInt primary = toJava(beaconPayment.getPrimaryEffect());
+        OptionalInt secondary = toJava(beaconPayment.getSecondaryEffect());
+
+        // Since Java 26.2, BeaconMenu#updateEffects failing disconnects the player outright, so any
+        // confirmation Java would refuse has to be rolled back on the Bedrock side instead of forwarded.
+        if (!selectionValid(container, primary, secondary)) {
+            return rejectRequest(request, false);
+        }
+
+        ServerboundSetBeaconPacket packet = new ServerboundSetBeaconPacket(primary, secondary);
         session.sendDownstreamGamePacket(packet);
         return acceptRequest(request, makeContainerEntries(session, container, IntSets.emptySet()));
     }
 
     private OptionalInt toJava(int effectChoice) {
         return effectChoice == 0 ? OptionalInt.empty() : OptionalInt.of(effectChoice - 1);
+    }
+
+    /**
+     * Mirrors both ways {@code BeaconMenu#updateEffects} can fail: an empty payment slot, and
+     * {@code BeaconBlockEntity#validateEffects} rejecting the selection for the beacon's Java level.
+     */
+    private static boolean selectionValid(BeaconContainer container, OptionalInt primary, OptionalInt secondary) {
+        if (container.getItem(0).isEmpty()) {
+            return false;
+        }
+        if (primary.isEmpty()) {
+            // Java accepts this and consumes the payment without applying anything, but its own
+            // client cannot submit it, so mirror the client rather than the server here
+            return false;
+        }
+        int levels = container.getBeaconLevel();
+        if (secondary.isPresent() && levels < 4) {
+            return false;
+        }
+        int primaryLevel = requiredLevel(primary);
+        int secondaryLevel = requiredLevel(secondary);
+        if (primaryLevel > levels || secondaryLevel > levels) {
+            return false;
+        }
+        if (primaryLevel >= 4) {
+            // Regeneration can never be the primary effect
+            return false;
+        }
+        return secondaryLevel == 0 || secondaryLevel >= 4 || primary.equals(secondary);
+    }
+
+    /**
+     * The beacon level each effect requires, mirroring {@code BeaconBlockEntity#BEACON_EFFECTS}.
+     * Anything not on that list requires a level no beacon can reach.
+     */
+    private static int requiredLevel(OptionalInt effectId) {
+        if (effectId.isEmpty()) {
+            return 0;
+        }
+        int id = effectId.getAsInt();
+        if (id < 0 || id >= EFFECTS.length) {
+            return Integer.MAX_VALUE;
+        }
+        return switch (EFFECTS[id]) {
+            case SPEED, HASTE -> 1;
+            case RESISTANCE, JUMP_BOOST -> 2;
+            case STRENGTH -> 3;
+            case REGENERATION -> 4;
+            default -> Integer.MAX_VALUE;
+        };
     }
 
     @Override

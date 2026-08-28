@@ -93,9 +93,13 @@ public class UpstreamPacketHandler extends LoggingPacketHandler {
     private final Deque<String> packsToSend = new ArrayDeque<>();
     private final CompressionStrategy compressionStrategy;
     // Avoid overloading consoles when downloading larger resource packs
-    private static final int PACKET_SEND_DELAY = 4 * 50;
+    private static final int PACKET_SEND_DELAY = Integer.getInteger("geyser.resourcePackSendDelay", 4 * 50);
     private final Queue<ResourcePackChunkRequestPacket> chunkRequestQueue = new ConcurrentLinkedQueue<>();
     private boolean currentlySendingChunks = false;
+    private long packSendStarted;
+    private int packChunksSent;
+    private long packBytesSent;
+    private int packPeakQueued;
     private SessionLoadResourcePacksEventImpl resourcePackLoadEvent;
 
     public UpstreamPacketHandler(GeyserImpl geyser, GeyserSession session) {
@@ -345,6 +349,11 @@ public class UpstreamPacketHandler extends LoggingPacketHandler {
 
         // Resolve some console pack downloading issues.
         // See <https://github.com/PowerNukkitX/PowerNukkitX/pull/1997> for reference
+        if (packSendStarted == 0) {
+            packSendStarted = System.nanoTime();
+        }
+        packPeakQueued = Math.max(packPeakQueued, chunkRequestQueue.size() + 1);
+
         chunkRequestQueue.add(packet);
         if (!currentlySendingChunks) {
             currentlySendingChunks = true;
@@ -408,7 +417,26 @@ public class UpstreamPacketHandler extends LoggingPacketHandler {
         // Also flushes packets
         // Avoids bursting slower / delayed clients
         session.sendUpstreamPacketImmediately(data);
-        session.scheduleInEventLoop(this::processNextChunk, PACKET_SEND_DELAY, TimeUnit.MILLISECONDS);
+        if (PACKET_SEND_DELAY > 0) {
+            session.scheduleInEventLoop(this::processNextChunk, PACKET_SEND_DELAY, TimeUnit.MILLISECONDS);
+        } else {
+            session.ensureInEventLoop(this::processNextChunk);
+        }
+
+        packChunksSent++;
+        packBytesSent += packData.length;
+        if (remainingSize <= GeyserResourcePack.CHUNK_SIZE) {
+            double seconds = (System.nanoTime() - packSendStarted) / 1_000_000_000D;
+            double megabytes = packBytesSent / 1048576D;
+            GeyserImpl.getInstance().getLogger().debug(
+                "Sent a resource pack to %s: %.1f MB in %.2fs (%.2f MB/s), %d chunks of %d KB, %d ms delay, %d requests queued at peak",
+                session.bedrockUsername(), megabytes, seconds, megabytes / seconds, packChunksSent,
+                GeyserResourcePack.CHUNK_SIZE / 1024, PACKET_SEND_DELAY, packPeakQueued);
+            packSendStarted = 0;
+            packChunksSent = 0;
+            packBytesSent = 0;
+            packPeakQueued = 0;
+        }
 
         // Check if it is the last chunk and send next pack in queue when available.
         if (remainingSize <= GeyserResourcePack.CHUNK_SIZE && !packsToSend.isEmpty()) {

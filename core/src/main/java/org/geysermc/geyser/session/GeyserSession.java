@@ -926,7 +926,9 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
             geyser.getLogger().debug("Extending overworld dimension to " + minY + " - " + maxY);
 
             DimensionDataPacket dimensionDataPacket = new DimensionDataPacket();
-            dimensionDataPacket.getDefinitions().add(new DimensionDefinition("minecraft:overworld", maxY, minY, 5, 3, GeyserIntegratedPackUtil.INTEGRATED_PACK_UUID, ""));
+            // Since 26.50 the client reads the height range here instead of the maximum Y
+            int maxOrRange = GameProtocol.is26_50orHigher(protocolVersion()) ? maxY - minY : maxY;
+            dimensionDataPacket.getDefinitions().add(new DimensionDefinition("minecraft:overworld", maxOrRange, minY, 5, 3, GeyserIntegratedPackUtil.INTEGRATED_PACK_UUID, ""));
             upstream.sendPacket(dimensionDataPacket);
         }
 
